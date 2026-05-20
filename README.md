@@ -260,3 +260,119 @@ app.post('/api/vpn/connect', (req, res) => {
 });
 
 app.listen(3000, () => console.log('🚀 VPN Authentication and profile allocation API running on Port 3000'));
+// vpnManager.test.ts
+import { VPNManager, VPNStatus } from './vpnManager'; // Your app's core engine logic
+
+describe('VPN Connection Stability & Reconnection Suite', () => {
+  let vpnManager: VPNManager;
+  let mockNativeBridge: any;
+
+  beforeEach(() => {
+    // Mock the native platform layer (iOS NetworkExtension / Android VpnService)
+    mockNativeBridge = {
+      startTunnel: jest.fn().mockResolvedValue(true),
+      stopTunnel: jest.fn().mockResolvedValue(true),
+      getCurrentStatus: jest.fn(),
+    };
+    vpnManager = new VPNManager(mockNativeBridge);
+  });
+
+  // TEST 1: Verify the app handles sudden dropouts by triggering a retry mechanism
+  it('should automatically attempt reconnection when connection drops unexpectedly', async () => {
+    jest.useFakeTimers();
+    
+    // Simulate initial stable connection
+    mockNativeBridge.getCurrentStatus.mockReturnValue(VPNStatus.CONNECTED);
+    await vpnManager.connect();
+    
+    expect(vpnManager.status).toBe(VPNStatus.CONNECTED);
+
+    // Act: Simulate an unexpected drop without the user tapping "Disconnect"
+    vpnManager.handleNativeStatusChange(VPNStatus.DISCONNECTED_UNEXPECTEDLY);
+
+    // Assert: Check if it switches to RECONNECTING state instead of just dying
+    expect(vpnManager.status).toBe(VPNStatus.RECONNECTING);
+    expect(vpnManager.reconnectAttempts).toBe(1);
+
+    // Fast-forward timer to check if retry logic fires
+    jest.advanceTimersByTime(2000); // Wait for the retry interval
+    expect(mockNativeBridge.startTunnel).toHaveBeenCalledTimes(2); // Initial + Retry
+
+    jest.useRealTimers();
+  });
+
+  // TEST 2: Verify the app stops retrying after max attempts to protect battery life
+  it('should stop reconnecting and throw an error after max retry limit reached', async () => {
+    jest.useFakeTimers();
+    
+    // Force the native tunnel to continuously fail when startTunnel is called
+    mockNativeBridge.startTunnel.mockRejectedValue(new Error("Network Unreachable"));
+    
+    vpnManager.handleNativeStatusChange(VPNStatus.DISCONNECTED_UNEXPECTEDLY);
+
+    // Simulate 5 rapid reconnection failures
+    for (let i = 0; i < 5; i++) {
+      jest.advanceTimersByTime(2000);
+    }
+
+    expect(vpnManager.status).toBe(VPNStatus.FAILED);
+    expect(vpnManager.reconnectAttempts).toBe(5);
+    
+    jest.useRealTimers();
+  });
+});// connectionGuard.js
+import NetInfo from "@react-native-community/netinfo";
+
+export function setupNetworkGuard(vpnManager) {
+  let lastNetworkType = null;
+
+  // Listen to global OS network interface changes
+  return NetInfo.addEventListener(state => {
+    const currentNetworkType = state.type; // 'wifi', 'cellular', 'none'
+    
+    if (lastNetworkType && lastNetworkType !== currentNetworkType) {
+      console.log(`📡 Network shifted from ${lastNetworkType} to ${currentNetworkType}`);
+      
+      if (vpnManager.isConnected()) {
+        // WireGuard handles roaming natively, but OpenVPN needs an explicit endpoint refresh
+        console.log("🔄 Re-aligning active VPN tunnel routes to new interface...");
+        vpnManager.triggerSeamlessHandshake();
+      }
+    }
+    
+    lastNetworkType = currentNetworkType;
+  });
+}appId: com.yourcompany.vpnapp
+---
+- clearState # Wipe state to simulate a fresh app installation
+- launchApp
+
+# Step 1: Walk through onboarding and verify we are disconnected
+- assertVisible: "UNPROTECTED"
+- assertVisible: "Tap to Connect"
+
+# Step 2: Tap the main toggle to initialize permissions
+- tapOn: "🛑" # Taps the central button
+
+# Step 3: Handle native OS-level Permission Prompts
+# This works natively on both Android and iOS configurations
+- runScript:
+    script: |
+      // Conditional handling for OS permissions if they appear
+      if (maestro.isVisible("Connection Request")) {
+          maestro.tapOn("OK"); // Android System permission accept
+      } else if (maestro.isVisible("Allow VPN Configurations")) {
+          maestro.tapOn("Allow"); // iOS System permission accept
+      }
+
+# Step 4: Validate UI state shift to Protected
+- extendedWaitUntil:
+    visible: "SECURELY CONNECTED"
+    timeout: 10000 # Give the secure protocol 10 seconds to handshake
+
+# Step 5: Test Background Survivability
+- backgroundApp: 5 # Send app to background for 5 seconds to ensure OS daemon doesn't kill it
+- launchApp
+- assertVisible: "SECURELY CONNECTED" # Ensure state survived deep sleep# If using wg-easy / wireguard on your backend server:
+wg show wg0 allowed-ips   # Find your mobile client's public key
+wg set wg0 peer CLIENT_PUBLIC_KEY remove
