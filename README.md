@@ -177,4 +177,86 @@ class MainActivity : AppCompatActivity() {
             startService(Intent(this, MyVpnService::class.java))
         }
     }
-}
+}version: "3.8"
+services:
+  wg-easy:
+    image: ghcr.io/wg-easy/wg-easy
+    container_name: wg-easy
+    environment:
+      # Change this to your explicit Linux VPS public IP
+      - WG_HOST=192.0.2.14 
+      - WG_DEFAULT_DNS=1.1.1.1
+      - WG_DEFAULT_ADDRESS=10.8.0.x
+      # Web UI management password (Optional / For testing via browser on port 51821)
+      - PASSWORD_HASH=$$2a$$12$$DfJ2phN2VE4Z1gyFNsGCluifeQUQzz.m4tF4hcHABqYq7yKXQ5cPW
+    volumes:
+      - .data:/etc/wireguard
+    ports:
+      - "51820:51820/udp" # The secure channel phone traffic streams through
+      - "51821:51821/tcp" # Web UI admin panel port
+    capabilities:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stoppedconst express = require('express');
+const jwt = require('jsonwebtoken');
+const { exec } = require('child_process');
+const app = express();
+
+app.use(express.json());
+
+const JWT_SECRET = "super_secret_unbreakable_key_12345";
+const WG_CONTAINER_NAME = "wg-easy";
+
+// 1. DUMMY LOGIN ENDPOINT (Connect this to your actual User Database later)
+app.post('/api/auth/login', (req, res) => {
+    const { email, password } = req.body;
+    
+    // Quick mock validation
+    if (email === "user@test.com" && password === "password123") {
+        const token = jwt.sign({ email, userId: "user_99" }, JWT_SECRET, { expiresIn: '7d' });
+        return res.json({ success: true, token });
+    }
+    return res.status(401).json({ success: false, error: "Invalid credentials" });
+});
+
+// 2. PROTECTED ROUTE TO REQUEST ACTIVE VPN PROFILE
+app.post('/api/vpn/connect', (req, res) => {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) return res.status(403).json({ error: "No token provided" });
+
+    const token = authHeader.split(' ')[1];
+    
+    // Verify the user is authenticated and active
+    jwt.verify(token, JWT_SECRET, (err, decoded) => {
+        if (err) return res.status(401).json({ error: "Session expired" });
+
+        const safeClientName = `user_${decoded.userId}`;
+
+        // Call the running Docker WireGuard container to generate a peer profile
+        // This command creates the keys and prints the configuration out directly
+        exec(`docker exec ${WG_CONTAINER_NAME} wgeasy add ${safeClientName}`, (error, stdout, stderr) => {
+            if (error && !stdout.includes("already exists")) {
+                return res.status(500).json({ error: "Failed to allocate secure server slot" });
+            }
+
+            // Read the newly created profile string configuration
+            exec(`docker exec ${WG_CONTAINER_NAME} cat /etc/wireguard/wg0.conf`, (catErr, configText) => {
+                if (catErr) return res.status(500).json({ error: "Error retrieving configuration details" });
+                
+                // Parse the raw database text to pull out ONLY this specific user's block
+                // For a highly scaling production app, you would parse and send the Client interface block
+                res.json({
+                    success: true,
+                    message: "Profile allocated successfully",
+                    // Pass the connection string back to WireGuardKit / GoBackend in the app
+                    configurationString: `[Interface]\nPrivateKey = GENERATED_CLIENT_PRIVATE_KEY\nAddress = 10.8.0.2/24\nDNS = 1.1.1.1\n\n[Peer]\nPublicKey = SERVER_PUBLIC_KEY\nEndpoint = YOUR_SERVER_IP:51820\nAllowedIPs = 0.0.0.0/0`
+                });
+            });
+        });
+    });
+});
+
+app.listen(3000, () => console.log('🚀 VPN Authentication and profile allocation API running on Port 3000'));
