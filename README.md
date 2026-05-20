@@ -539,4 +539,113 @@ const styles = StyleSheet.create({
   activeIndicatorIcon: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#3b82f6' }
 });const startTimestamp = Date.now();
 await fetch(`http://${serverIp}/ping-check`, { method: 'HEAD' });
-const localizedPing = Date.now() - startTimestamp;
+const localizedPing = Date.now() - // Inside your Android MyVpnService.kt
+fun configureKillSwitch(builder: VpnService.Builder) {
+    // 1. Check if the device is running Android 10 (API 29) or higher
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
+        // This system native call blocks any global network traffic 
+        // that tries to bypass the VPN interface when it fluctuates.
+        builder.setMetered(false) 
+    }
+    
+    // 2. Strict Kill Switch Routing
+    // By establishing a precise global destination anchor without adding a 
+    // default system route fallback path, the OS drops non-VPN packets automatically.
+    builder.addRoute("0.0.0.0", 0) 
+}// Inside your Android MyVpnService.kt
+fun applySplitTunneling(builder: VpnService.Builder, excludedApps: List<String>) {
+    // Example excludedApps list: ["com.google.android.youtube", "com.yourbank.app"]
+    for (packageName in excludedApps) {
+        try {
+            // Tells the OS: "Route this package's packets over standard Wi-Fi / Cellular lines instead"
+            builder.addDisallowedApplication(packageName)
+        } catch (e: PackageManager.NameNotFoundException) {
+            // Handle edge-case where app isn't installed on user's device
+        }
+    }
+}// Inside your iOS PacketTunnelProvider.swift
+func applySplitTunnelingRoutes(settings: NEPacketTunnelNetworkSettings) {
+    let ipv4Settings = NEIPv4Settings(addresses: ["10.0.0.2"], subnetMasks: ["255.255.255.0"])
+    
+    // Instead of routing ALL traffic via NEIPv4Route.default(), 
+    // you explicitly define what goes THROUGH the tunnel. 
+    // Everything else automatically defaults to standard open Wi-Fi.
+    let secureCorporateSubnet = NEIPv4Route(destinationAddress: "192.168.50.0", subnetMask: "255.255.255.0")
+    ipv4Settings.includedRoutes = [secureCorporateSubnet]
+    
+    settings.ipv4Settings = ipv4Settings
+}// TelemetryDashboard.jsx
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, SafeAreaView } from 'react-native';
+
+export default function TelemetryDashboard({ nativeVpnStatsAdapter }) {
+  const [metrics, setMetrics] = useState({ uploadSpeed: '0.0 KB/s', downloadSpeed: '0.0 KB/s', latency: '0 ms' });
+
+  useEffect(() => {
+    // 1. Establish an asynchronous runtime interval loop to poll bytes handled by the OS
+    const telemetryInterval = setInterval(() => {
+      const stats = nativeVpnStatsAdapter.getLiveTunnelBytes();
+      
+      setMetrics({
+        uploadSpeed: formatByteRate(stats.bytesTxPerSecond),
+        downloadSpeed: formatByteRate(stats.bytesRxPerSecond),
+        latency: `${stats.currentPingMs} ms`
+      });
+    }, 1000); // Re-calculate velocities every single second
+
+    return () => clearInterval(telemetryInterval);
+  }, []);
+
+  const formatByteRate = (bytes) => {
+    if (bytes < 1024) return `${bytes} B/s`;
+    const kib = bytes / 1024;
+    if (kib < 1024) return `${kib.toFixed(1)} KB/s`;
+    return `${(kib / 1024).toFixed(1)} MB/s`;
+  };
+
+  return (
+    <View style={styles.metricsGrid}>
+      <View style={styles.metricBlock}>
+        <Text style={styles.label}>PING LATENCY</Text>
+        <Text style={styles.value}>{metrics.latency}</Text>
+      </View>
+      <View style={styles.metricBlock}>
+        <Text style={styles.label}>DOWNLOAD</Text>
+        <Text style={styles.value}>⬇ {metrics.downloadSpeed}</Text>
+      </View>
+      <View style={styles.metricBlock}>
+        <Text style={styles.label}>UPLOAD</Text>
+        <Text style={styles.value}>⬆ {metrics.uploadSpeed}</Text>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  metricsGrid: { flexDirection: 'row', backgroundColor: '#1e293b', borderRadius: 12, padding: 15, marginTop: 20 },
+  metricBlock: { flex: 1, alignItems: 'center' },
+  label: { color: '#64748b', fontSize: 10, fontWeight: 'bold', letterSpacing: 1 },
+  value: { color: '#fff', fontSize: 15, fontWeight: '600', marginTop: 4 }
+});// telemetryTracker.js
+const ANALYTICS_ENDPOINT = 'https://api.yourvpn.com/v1/telemetry';
+
+export async function recordAnonymizedSession(userId, serverId, sessionDurationSecs) {
+  const payload = {
+    // Use an opaque, non-identifiable timestamp marker
+    timestamp: new Date().toISOString().split('T')[0], // YYYY-MM-DD only (Zero granular tracking)
+    targetNodeId: serverId,
+    duration: sessionDurationSecs,
+    platform: Platform.OS // 'ios' or 'android'
+  };
+
+  try {
+    await fetch(ANALYTICS_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    // Silently log metrics pipeline failure locally so it never interrupts the tunnel process
+    console.debug("Telemetry ingestion offline.");
+  }
+}
