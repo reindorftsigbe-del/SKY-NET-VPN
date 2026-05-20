@@ -375,4 +375,168 @@ export function setupNetworkGuard(vpnManager) {
 - launchApp
 - assertVisible: "SECURELY CONNECTED" # Ensure state survived deep sleep# If using wg-easy / wireguard on your backend server:
 wg show wg0 allowed-ips   # Find your mobile client's public key
-wg set wg0 peer CLIENT_PUBLIC_KEY remove
+wg set wg0 peer CLIENT_PUBLIC_KEY remove// server.js (Append this logic to your existing Express backend)
+const express = require('express');
+const cors = require('cors');
+const app = express();
+
+app.use(cors()); // Allow your mobile client to fetch data across domains
+app.use(express.json());
+
+// Mock database containing active infrastructure nodes
+const VPN_SERVER_CLUSTER = [
+  { id: "srv_us_ny", country: "United States", city: "New York", flag: "🇺🇸", ipAddress: "192.0.2.55", activeLoad: 42, basePingMs: 18 },
+  { id: "srv_uk_lon", country: "United Kingdom", city: "London", flag: "🇬🇧", ipAddress: "198.51.100.12", activeLoad: 78, basePingMs: 65 },
+  { id: "srv_de_fra", country: "Germany", city: "Frankfurt", flag: "🇩🇪", ipAddress: "203.0.113.8", activeLoad: 12, basePingMs: 82 },
+  { id: "srv_jp_tok", country: "Japan", city: "Tokyo", flag: "🇯🇵", ipAddress: "192.0.2.190", activeLoad: 91, basePingMs: 145 },
+  { id: "srv_sg_sin", country: "Singapore", city: "Downtown", flag: "🇸🇬", ipAddress: "198.51.100.4", activeLoad: 33, basePingMs: 190 }
+];
+
+/**
+ * GET /api/servers
+ * Returns available nodes sorted dynamically by load metrics
+ */
+app.get('/api/servers', (req, res) => {
+  try {
+    // Optional architectural logic: Filter out dead nodes or sort by lowest activeLoad
+    const optimalServers = [...VPN_SERVER_CLUSTER].sort((a, b) => a.activeLoad - b.activeLoad);
+    
+    res.status(200).json({
+      success: true,
+      timestamp: Date.now(),
+      count: optimalServers.length,
+      servers: optimalServers
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: "Internal registry error" });
+  }
+});
+
+// Start listening
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`📡 Server Registry API active on port ${PORT}`));// ServerSelector.jsx
+import React, { useState, useEffect } from 'react';
+import { StyleSheet, Text, View, FlatList, TouchableOpacity, ActivityIndicator, SafeAreaView } from 'react-native';
+
+const API_ENDPOINT = 'http://YOUR_SERVER_IP:3000/api/servers';
+
+export default function ServerSelector({ onSelectServer, currentServer }) {
+  const [servers, setServers] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
+  // Fetch data cleanly from our REST endpoint
+  const fetchServers = async () => {
+    try {
+      const response = await fetch(API_ENDPOINT);
+      const json = await response.json();
+      if (json.success) {
+        setServers(json.servers);
+      }
+    } catch (error) {
+      console.error("Failed fetching live server manifest: ", error);
+    } finally {
+      setIsLoading(false);
+      setIsRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchServers();
+  }, []);
+
+  const handleRefresh = () => {
+    setIsRefreshing(true);
+    fetchServers();
+  };
+
+  // Helper function to color code latency boundaries
+  const getPingColor = (ping) => {
+    if (ping < 50) return '#10b981'; // Green (Excellent)
+    if (ping < 120) return '#f59e0b'; // Yellow (Average)
+    return '#ef4444'; // Red (High Latency)
+  };
+
+  // Render design block for individual server entries
+  const renderServerItem = ({ item }) => {
+    const isSelected = currentServer?.id === item.id;
+
+    return (
+      <TouchableOpacity 
+        style={[styles.serverCard, isSelected && styles.selectedCard]}
+        onPress={() => onSelectServer(item)}
+      >
+        <Text style={styles.flag}>{item.flag}</Text>
+        
+        <View style={styles.infoContainer}>
+          <Text style={styles.countryName}>{item.country}</Text>
+          <Text style={styles.cityName}>{item.city} • Load: {item.activeLoad}%</Text>
+        </View>
+
+        <View style={styles.metaContainer}>
+          <Text style={[styles.pingText, { color: getPingColor(item.basePingMs) }]}>
+            {item.basePingMs}ms
+          </Text>
+          {isSelected && <View style={styles.activeIndicatorIcon} />}
+        </View>
+      </TouchableOpacity>
+    );
+  };
+
+  if (isLoading) {
+    return (
+      <View style={styles.centeredContainer}>
+        <ActivityIndicator size="large" color="#3b82f6" />
+        <Text style={styles.loadingText}>Locating fastest secure nodes...</Text>
+      </View>
+    );
+  }
+
+  return (
+    <SafeAreaView style={styles.container}>
+      <View style={styles.header}>
+        <Text style={styles.title}>Select Location</Text>
+        <Text style={styles.subtitle}>Choose a server closest to your region for maximum speeds.</Text>
+      </View>
+
+      <FlatList
+        data={servers}
+        keyExtractor={(item) => item.id}
+        renderItem={renderServerItem}
+        refreshing={isRefreshing}
+        onRefresh={handleRefresh}
+        contentContainerStyle={styles.listContent}
+      />
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#0f172a' },
+  centeredContainer: { flex: 1, backgroundColor: '#0f172a', justifyContent: 'center', alignItems: 'center' },
+  loadingText: { color: '#94a3b8', marginTop: 12, fontSize: 14 },
+  header: { padding: 20, borderBottomWidth: 1, borderColor: '#1e293b' },
+  title: { color: '#fff', fontSize: 22, fontWeight: 'bold' },
+  subtitle: { color: '#64748b', fontSize: 13, marginTop: 4 },
+  listContent: { padding: 15 },
+  serverCard: { 
+    flexDirection: 'row', 
+    backgroundColor: '#1e293b', 
+    padding: 16, 
+    borderRadius: 12, 
+    alignItems: 'center', 
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: 'transparent'
+  },
+  selectedCard: { borderColor: '#3b82f6', backgroundColor: '#1e293b' },
+  flag: { fontSize: 28 },
+  infoContainer: { flex: 1, marginLeft: 16 },
+  countryName: { color: '#fff', fontSize: 16, fontWeight: '600' },
+  cityName: { color: '#64748b', fontSize: 12, marginTop: 2 },
+  metaContainer: { alignItems: 'flex-end', flexDirection: 'row', alignItems: 'center' },
+  pingText: { fontSize: 14, fontWeight: 'bold', marginRight: 10 },
+  activeIndicatorIcon: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#3b82f6' }
+});const startTimestamp = Date.now();
+await fetch(`http://${serverIp}/ping-check`, { method: 'HEAD' });
+const localizedPing = Date.now() - startTimestamp;
