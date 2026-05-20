@@ -648,4 +648,161 @@ export async function recordAnonymizedSession(userId, serverId, sessionDurationS
     // Silently log metrics pipeline failure locally so it never interrupts the tunnel process
     console.debug("Telemetry ingestion offline.");
   }
+}#!/bin/bash
+# system-vpn-init.sh -> Run as root on your cloud server
+
+# 1. Core Network Infrastructure Updates
+sudo apt update && sudo apt install -y wireguard wireguard-tools iptables-persistent
+
+# 2. Open Native Linux Kernel Packet Forwarding
+# This changes routing flags so the OS routes data packets between physical devices and the virtual tunnel interface.
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+echo "net.ipv6.conf.all.forwarding=1" | sudo tee -a /etc/sysctl.conf
+sudo sysctl -p
+
+# 3. Generate Central Server Cryptographic Credentials
+mkdir -p /etc/wireguard && cd /etc/wireguard
+umask 077
+wg genkey | tee server_private.key | wg pubkey > server_public.key
+
+SERVER_PRIV_KEY=$(cat server_private.key)
+# Detect the server's main physical internet-facing interface (e.g., eth0)
+PRIMARY_NET_INTERFACE=$(ip route show default | awk '/default/ {print $5}')
+
+# 4. Construct System-Level Core WireGuard Interface Layout
+cat <<EOF > /etc/wireguard/wg0.conf
+[Interface]
+PrivateKey = ${SERVER_PRIV_KEY}
+Address = 10.200.0.1/24
+ListenPort = 51820
+
+# PostUp/PostDown rules use iptables rules to transparently handle NAT firewall masquerading 
+# as packets travel from your phone to the open internet.
+PostUp = iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${PRIMARY_NET_INTERFACE} -j ACCEPT
+PostDown = iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o ${PRIMARY_NET_INTERFACE} -j ACCEPT
+EOF
+
+# 5. Bring up your network anchor
+sudo systemctl enable wg-quick@wg0
+sudo systemctl start wg-quick@wg0
+echo "🚀 WireGuard Kernel Node initialized successfully on Port 51820."// server.js (Node.js API Control Center)
+const express = require('express');
+const { execSync } = require('child_process');
+const fs = require('fs');
+const app = express();
+
+app.use(express.json());
+
+const SERVER_PUBLIC_IP = "YOUR_LINUX_VPS_PUBLIC_IP";
+const WG_PORT = "51820";
+const WG_INTERFACE = "wg0";
+
+// For demonstration, an in-memory database tracks IP assignments sequentially
+let currentAssignedIpTail = 2; 
+
+/**
+ * POST /api/vpn/provision-peer
+ * High-performance hook called by the mobile client when pressing "Connect"
+ */
+app.post('/api/vpn/provision-peer', (req, res) => {
+    try {
+        const { clientPublicKey } = req.body;
+        
+        if (!clientPublicKey || clientPublicKey.length !== 44) {
+            return res.status(400).json({ error: "Malformed cryptographic public key payload" });
+        }
+
+        // 1. Allocate a unique IP block within our virtual subnet to prevent crossover
+        if (currentAssignedIpTail >= 254) {
+            return res.status(507).json({ error: "Server infrastructure capacity saturation reached" });
+        }
+        
+        const allocatedClientIp = `10.200.0.${currentAssignedIpTail}/32`;
+        currentAssignedIpTail++;
+
+        // 2. Fetch the host's public key to compile the client-side configuration text
+        const serverPublicKey = execSync("cat /etc/wireguard/server_public.key").toString().trim();
+
+        // 3. Inject the client's public key directly into the Linux routing engine in real-time
+        // Using "wg set" adds the peer dynamically without restarting the network interface or dropping active users.
+        const registerPeerCmd = `sudo wg set ${WG_INTERFACE} peer "${clientPublicKey}" allowed-ips ${allocatedClientIp}`;
+        execSync(registerPeerCmd);
+
+        // 4. Save to persistent server config storage so profiles survive server reboots
+        const configAppendBlock = `\n[Peer]\nPublicKey = ${clientPublicKey}\nAllowedIPs = ${allocatedClientIp}\n`;
+        fs.appendFileSync('/etc/wireguard/wg0.conf', configAppendBlock);
+
+        // 5. Construct and respond with the exact, compilation-ready config block string
+        const optimizedClientConfig = [
+            `[Interface]`,
+            `Address = ${allocatedClientIp.replace('/32', '/24')}`,
+            `DNS = 1.1.1.1, 8.8.8.8`,
+            ``,
+            `[Peer]`,
+            `PublicKey = ${serverPublicKey}`,
+            `Endpoint = ${SERVER_PUBLIC_IP}:${WG_PORT}`,
+            `AllowedIPs = 0.0.0.0/0`,
+            `PersistentKeepalive = 25`
+        ].join('\n');
+
+        return res.status(200).json({
+            success: true,
+            assignedIp: allocatedClientIp,
+            wgProfileText: optimizedClientConfig
+        });
+
+    } catch (error) {
+        console.error("Internal Engine Allocation Failure:", error);
+        return res.status(500).json({ error: "System runtime interface exception error" });
+    }
+});
+
+app.listen(3000, () => console.log('⚡ Orchestration Controller API operational on port 3000'));
+// vpnOrchestrator.ts
+import { NativeModules, Platform } from 'react-native';
+
+const API_GATEWAY = "http://YOUR_SERVER_IP:3000/api/vpn/provision-peer";
+
+// Accessing the native OS-level platforms we created during our earlier architectural steps
+const { AndroidVpnModule, IosPacketTunnelModule } = NativeModules;
+
+export async function startSecureVpnTunnel(): Promise<boolean> {
+  try {
+    console.log("⚙️ Initializing local security handshakes...");
+    
+    // 1. Generate local key pairs strictly on the device (Private key never leaves the phone)
+    // You can use libraries like 'react-native-quick-crypto' or native bindings
+    const clientPrivateKey = "PRIVATE_KEY_GENERATED_SECURELY_ON_DEVICE_BASE64";
+    const clientPublicKey = "PUBLIC_KEY_DERIVED_FROM_PRIVATE_BASE64_44_CHARS";
+
+    // 2. Safely register with your infrastructure cluster
+    const response = await fetch(API_GATEWAY, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientPublicKey: clientPublicKey })
+    });
+
+    const result = await response.json();
+    if (!result.success) throw new Error("Server rejected provisioning profile parameters");
+
+    // 3. Inject our local private key into the configuration profile template received from the server
+    const customizedLocalProfile = result.wgProfileText.replace(
+      `[Interface]`,
+      `[Interface]\nPrivateKey = ${clientPrivateKey}`
+    );
+
+    // 4. Pass the final configuration text profile directly into the native platform adapters
+    if (Platform.OS === 'android') {
+      const connectionSuccess = await AndroidVpnModule.startTunnelEngine(customizedLocalProfile);
+      return connectionSuccess;
+    } else if (Platform.OS === 'ios') {
+      const connectionSuccess = await IosPacketTunnelModule.startExtensionEngine(customizedLocalProfile);
+      return connectionSuccess;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("🚨 Critical Handshake Routing Exception:", error);
+    return false;
+  }
 }
